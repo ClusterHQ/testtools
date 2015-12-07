@@ -1,4 +1,4 @@
-# Copyright (c) 2010 testtools developers. See LICENSE for details.
+# Copyright (c) 2010-2015 testtools developers. See LICENSE for details.
 
 """Individual test case execution for tests that return Deferreds.
 
@@ -13,10 +13,14 @@ __all__ = [
     'SynchronousDeferredRunTest',
     ]
 
+import warnings
 import sys
 
+from fixtures import Fixture
+
 from testtools.compat import StringIO
-from testtools.content import text_content
+from testtools.content import Content, text_content
+from testtools.content_type import UTF8_TEXT
 from testtools.runtest import RunTest
 from testtools._spinner import (
     extract_result,
@@ -58,8 +62,13 @@ class SynchronousDeferredRunTest(_DeferredRunTest):
         return result
 
 
-def run_with_log_observers(observers, function, *args, **kwargs):
-    """Run 'function' with the given Twisted log observers."""
+def _get_global_publisher_and_observers():
+    """Return ``(log_publisher, observers)``.
+
+    Twisted 15.2.0 changed the logging framework. This method will always
+    return a tuple of the global log publisher and all observers associated
+    with that publisher.
+    """
     if globalLogPublisher is not None:
         # Twisted >= 15.2.0, with the new twisted.logger framework.
         # log.theLogPublisher.observers will only contain legacy observers;
@@ -69,26 +78,92 @@ def run_with_log_observers(observers, function, *args, **kwargs):
         # observers we want to run with via log.theLogPublisher, because
         # _LogObserver may consider old keys and require them to be mapped.
         publisher = globalLogPublisher
-        real_observers = list(publisher._observers)
+        return (publisher, list(publisher._observers))
     else:
         publisher = log.theLogPublisher
-        real_observers = list(publisher.observers)
-    for observer in real_observers:
-        publisher.removeObserver(observer)
-    for observer in observers:
-        log.theLogPublisher.addObserver(observer)
-    try:
-        return function(*args, **kwargs)
-    finally:
-        for observer in observers:
-            log.theLogPublisher.removeObserver(observer)
-        for observer in real_observers:
-            publisher.addObserver(observer)
+        return (publisher, list(publisher.observers))
+
+
+class _NoTwistedLogObservers(Fixture):
+    """Completely but temporarily remove all Twisted log observers."""
+
+    def _setUp(self):
+        publisher, real_observers = _get_global_publisher_and_observers()
+        for observer in reversed(real_observers):
+            publisher.removeObserver(observer)
+            self.addCleanup(publisher.addObserver, observer)
+
+
+class _TwistedLogObservers(Fixture):
+    """Temporarily add Twisted log observers."""
+
+    def __init__(self, observers):
+        super(_TwistedLogObservers, self).__init__()
+        self._observers = observers
+        self._log_publisher = log.theLogPublisher
+
+    def _setUp(self):
+        for observer in self._observers:
+            self._log_publisher.addObserver(observer)
+            self.addCleanup(self._log_publisher.removeObserver, observer)
+
+
+class _ErrorObserver(Fixture):
+    """Capture errors logged while fixture is active."""
+
+    def __init__(self, error_observer):
+        super(_ErrorObserver, self).__init__()
+        self._error_observer = error_observer
+
+    def _setUp(self):
+        self.useFixture(_TwistedLogObservers([self._error_observer.gotEvent]))
+
+    def flush_logged_errors(self, *error_types):
+        """Clear errors of the given types from the logs.
+
+        If no errors provided, clear all errors.
+
+        :return: An iterable of errors removed from the logs.
+        """
+        return self._error_observer.flushErrors(*error_types)
+
+
+class _CaptureTwistedLogs(Fixture):
+    """Capture all the Twisted logs and add them as a detail."""
+
+    LOG_DETAIL_NAME = 'twisted-log'
+
+    def _setUp(self):
+        logs = StringIO()
+        full_observer = log.FileLogObserver(logs)
+        self.useFixture(_TwistedLogObservers([full_observer.emit]))
+        self.addDetail(self.LOG_DETAIL_NAME, Content(UTF8_TEXT, logs.getvalue))
+
+
+def run_with_log_observers(observers, function, *args, **kwargs):
+    """Run 'function' with the given Twisted log observers."""
+    warnings.warn(
+        'run_with_log_observers is deprecated since 1.8.2.',
+        DeprecationWarning, stacklevel=2)
+    with _NoTwistedLogObservers():
+        with _TwistedLogObservers(observers):
+            return function(*args, **kwargs)
 
 
 # Observer of the Twisted log that we install during tests.
+#
+# This is a global so that users can call flush_logged_errors errors in their
+# test cases.
 _log_observer = _LogObserver()
 
+
+def flush_logged_errors(*error_types):
+    # XXX: jml: I would like to deprecate this in favour of
+    # _ErrorObserver.flush_logged_errors so that I can avoid mutable global
+    # state. However, I don't know how to make the correct instance of
+    # _ErrorObserver.flush_logged_errors available to the end user. I also
+    # don't yet have a clear deprecation/migration path.
+    return _log_observer.flushErrors(*error_types)
 
 
 class AsynchronousDeferredRunTest(_DeferredRunTest):
@@ -237,21 +312,21 @@ class AsynchronousDeferredRunTest(_DeferredRunTest):
             return False, []
 
     def _run_core(self):
-        # Add an observer to trap all logged errors.
+        # XXX: Blatting over the namespace of the test case isn't a nice thing
+        # to do. Find a better way of communicating between runtest and test
+        # case.
         self.case.reactor = self._reactor
-        error_observer = _log_observer
-        full_log = StringIO()
-        full_observer = log.FileLogObserver(full_log)
         spinner = self._make_spinner()
-        successful, unhandled = run_with_log_observers(
-            [error_observer.gotEvent, full_observer.emit],
-            self._blocking_run_deferred, spinner)
 
-        self.case.addDetail(
-            'twisted-log', text_content(full_log.getvalue()))
+        # XXX: We want to make the use of these two fixtures optional, and
+        # ideally, make it so they aren't used by default.
+        self.case.useFixture(_NoTwistedLogObservers())
+        self.case.useFixture(_CaptureTwistedLogs())
 
-        logged_errors = error_observer.flushErrors()
-        for logged_error in logged_errors:
+        with _ErrorObserver(_log_observer) as error_fixture:
+            successful, unhandled = self._blocking_run_deferred(
+                spinner)
+        for logged_error in error_fixture.flush_logged_errors():
             successful = False
             self._got_user_failure(logged_error, tb_label='logged-error')
 
@@ -334,10 +409,6 @@ def assert_fails_with(d, *exc_types, **kwargs):
         raise failureException("%s raised instead of %s:\n %s" % (
             failure.type.__name__, expected_names, failure.getTraceback()))
     return d.addCallbacks(got_success, got_failure)
-
-
-def flush_logged_errors(*error_types):
-    return _log_observer.flushErrors(*error_types)
 
 
 class UncleanReactorError(Exception):

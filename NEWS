@@ -17,6 +17,13 @@ Changes
 * ``TestCase`` objects can now be run twice. All internal state is reset
   between runs.  (Jonathan Lange)
 
+* Make ``fixtures`` a real dependency, not just a test dependency.
+  (Jonathan Lange)
+
+* ``testtools.deferredruntest.run_with_log_observers`` is deprecated.
+  (Jonathan Lange)
+
+
 1.8.1
 ~~~~~
 
