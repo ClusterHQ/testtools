@@ -26,6 +26,7 @@ from twisted.internet import defer
 from twisted.internet.base import DelayedCall
 from twisted.internet.interfaces import IReactorThreads
 from twisted.python.failure import Failure
+from twisted.python import log
 from twisted.python.util import mergeFunctionMetadata
 
 
@@ -168,7 +169,7 @@ class Spinner(object):
     # the ideal, and it actually works for many cases.
     _OBLIGATORY_REACTOR_ITERATIONS = 0
 
-    def __init__(self, reactor, debug=False):
+    def __init__(self, reactor, debug=False, logger=None):
         """Construct a Spinner.
 
         :param reactor: A Twisted reactor.
@@ -182,10 +183,14 @@ class Spinner(object):
         self._saved_signals = []
         self._junk = []
         self._debug = debug
+        if logger is None:
+            logger = log
+        self._logger = logger
 
     def _cancel_timeout(self):
         if self._timeout_call:
             self._timeout_call.cancel()
+        self._log('Cancelled timeout')
 
     def _get_result(self):
         if self._failure is not self._UNSET:
@@ -203,10 +208,32 @@ class Spinner(object):
         self._success = result
 
     def _stop_reactor(self, ignored=None):
-        """Stop the reactor!"""
+        """Stop the reactor.
+
+        Called by spinner when it deliberately wants to start the reactor,
+        because it has a result or because it timed out.
+        """
+        self._log('Deliberately stopping the reactor via crash()')
+        self._reactor.crash()
+
+    def _fake_stop(self):
+        """Stop the reactor.
+
+        Installed in place of the actual ``reactor.stop()``, because we need
+        to restart the reactor and we cannot do so after a call to the _real_
+        ``reactor.stop``.
+
+        Ought not to be called directly by the spinner.
+
+        Distinct from ``_stop_reactor`` to communicate different intent.
+        """
+        # XXX: Should be warning level at least. Ideally we'd report *who*
+        # stopped the reactor.
+        self._log('Someone else stopped the reactor. panic.')
         self._reactor.crash()
 
     def _timed_out(self, function, timeout):
+        self._log('Timed out (timeout=%r)' % (timeout,))
         e = TimeoutError(function, timeout)
         self._failure = Failure(e)
         self._stop_reactor()
@@ -261,6 +288,24 @@ class Spinner(object):
             signal.signal(sig, hdlr)
         self._saved_signals = []
 
+    def _log(self, message):
+        # XXX: This is Twisted's *legacy* logging API. Use something better.
+        # (OTOH, what versions of Twisted does testtools actually support?)
+
+        # XXX: Support levels
+
+        # XXX: Twisted has structured logging: use it.
+
+        # XXX: Would be good to have something that briefly identifies *which*
+        # spinner is going on, to make race conditions easier to debug.
+        # Spinner ID is a good start, but would be nice to link to the test
+        # being run.
+
+        # XXX: Ideally want some way to disable this logging during tests, so
+        # that we can make reliable assertions about calls to logs in user
+        # code. (See test_log_to_twisted, test_do_not_log_to_twisted)
+        self._logger.msg('%r: %s' % (self, message))
+
     @not_reentrant
     def run(self, timeout, function, *args, **kwargs):
         """Run 'function' in a reactor.
@@ -279,6 +324,7 @@ class Spinner(object):
         :return: Whatever is at the end of the function's callback chain.  If
             it's an error, then raise that.
         """
+        logger = self._log
         debug = MonkeyPatcher()
         if self._debug:
             debug.add_patch(defer.Deferred, 'debug', True)
@@ -288,7 +334,9 @@ class Spinner(object):
             junk = self.get_junk()
             if junk:
                 raise StaleJunkError(junk)
+            logger('Overriding signal handlers')
             self._save_signals()
+            logger('Installing timeout')
             self._timeout_call = self._reactor.callLater(
                 timeout, self._timed_out, function, timeout)
             # Calling 'stop' on the reactor will make it impossible to
@@ -297,17 +345,22 @@ class Spinner(object):
             # with crash.  XXX: It might be a better idea to either install
             # custom signal handlers or to override the methods that are
             # Twisted's signal handlers.
-            stop, self._reactor.stop = self._reactor.stop, self._reactor.crash
+            logger('Overriding reactor.stop (was %r)' % (self._reactor.stop,))
+            real_stop, self._reactor.stop = self._reactor.stop, self._fake_stop
             def run_function():
                 d = defer.maybeDeferred(function, *args, **kwargs)
                 d.addCallbacks(self._got_success, self._got_failure)
                 d.addBoth(self._stop_reactor)
             try:
                 self._reactor.callWhenRunning(run_function)
+                logger('Starting reactor')
                 self._reactor.run()
             finally:
-                self._reactor.stop = stop
+                self._reactor.stop = real_stop
+                logger(
+                    'Restored reactor.stop (now %r)' % (self._reactor.stop,))
                 self._restore_signals()
+                logger('Restored signal handlers')
             try:
                 return self._get_result()
             finally:
