@@ -18,9 +18,15 @@ testtools
 .. automodule:: testtools
    :members:
 
-
 testtools.matchers
 ------------------
 
 .. automodule:: testtools.matchers
+   :members:
+
+
+testtools.twistedsupport
+-------------------------
+
+.. automodule:: testtools.twistedsupport
    :members:
