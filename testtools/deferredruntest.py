@@ -174,6 +174,19 @@ def run_with_log_observers(observers, function, *args, **kwargs):
 _log_observer = _LogObserver()
 
 
+# XXX: Should really be in python-fixtures
+class _CompoundFixture(Fixture):
+    """A fixture that combines many fixtures."""
+
+    def __init__(self, fixtures):
+        super(_CompoundFixture, self).__init__()
+        self._fixtures = fixtures
+
+    def _setUp(self):
+        for fixture in self._fixtures:
+            self.useFixture(fixture)
+
+
 def flush_logged_errors(*error_types):
     """Flush errors of the given types from the global Twisted log.
 
@@ -367,6 +380,17 @@ class AsynchronousDeferredRunTest(_DeferredRunTest):
             self._log_user_exception(TimeoutError(self.case, self._timeout))
             return False, []
 
+    def _get_log_fixture(self):
+        """Return the log fixture we're configured to use."""
+        fixtures = []
+        # XXX: Expose these fixtures and deprecate both of these options in
+        # favour of them.
+        if self._suppress_twisted_logging:
+            fixtures.append(_NoTwistedLogObservers())
+        if self._store_twisted_logs:
+            fixtures.append(CaptureTwistedLogs())
+        return _CompoundFixture(fixtures)
+
     def _run_core(self):
         # XXX: Blatting over the namespace of the test case isn't a nice thing
         # to do. Find a better way of communicating between runtest and test
@@ -374,19 +398,20 @@ class AsynchronousDeferredRunTest(_DeferredRunTest):
         self.case.reactor = self._reactor
         spinner = self._make_spinner()
 
-        # XXX: Expose these fixtures and deprecate both of these options in
-        # favour of them.
-        if self._suppress_twisted_logging:
-            self.case.useFixture(_NoTwistedLogObservers())
-        if self._store_twisted_logs:
-            self.case.useFixture(CaptureTwistedLogs())
+        logging_fixture = self._get_log_fixture()
 
-        with _ErrorObserver(_log_observer) as error_fixture:
-            successful, unhandled = self._blocking_run_deferred(
-                spinner)
-        for logged_error in error_fixture.flush_logged_errors():
-            successful = False
-            self._got_user_failure(logged_error, tb_label='logged-error')
+        # We can't just install these as fixtures on self.case, because we
+        # need the clean up to run even if the test times out.
+        with logging_fixture as capture_logs:
+            for name, detail in capture_logs.getDetails().items():
+                self.case.addDetail(name, detail)
+            with _ErrorObserver(_log_observer) as error_fixture:
+                successful, unhandled = self._blocking_run_deferred(
+                    spinner)
+            for logged_error in error_fixture.flush_logged_errors():
+                successful = False
+                self._got_user_failure(
+                    logged_error, tb_label='logged-error')
 
         if unhandled:
             successful = False

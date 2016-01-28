@@ -3,6 +3,29 @@ testtools NEWS
 
 Changes and improvements to testtools_, grouped by release.
 
+Next
+~~~~
+
+Changes
+-------
+
+* ``AsynchronousDeferredRunTest`` now has ``suppress_twisted_logging`` and
+  ``store_twisted_logs`` parameters that can be used to override the default
+  logging behaviour.  (Jonathan Lange, #942785)
+
+* New fixture ``CaptureTwistedLogs`` that can be used with
+  ``AsynchronousDeferredRunTest`` to attach a detail containing everything
+  logged to Twisted during the test run.  (Jonathan Lange, #1515362)
+
+* Python 2.6 and 3.2 are no longer supported. If you want to use either of
+  these versions of Python, use testtools 1.9.0. (Jonathan Lange)
+
+* Make ``fixtures`` a real dependency, not just a test dependency.
+  (Jonathan Lange)
+
+* ``run_with_log_observers`` is deprecated.
+
+
 1.9.0
 ~~~~~
 
@@ -76,12 +99,6 @@ Changes
 * Add ``readthedocs-requirements.txt`` so readthedocs.org can build the
   Twisted API documentation. (Jonathan Lange)
 
-* Make ``fixtures`` a real dependency, not just a test dependency.
-  (Jonathan Lange)
-
-* ``testtools.deferredruntest.run_with_log_observers`` is deprecated.
-  (Jonathan Lange)
-
 * ``AsynchronousDeferredRunTest`` now has ``suppress_twisted_logging`` and
   ``store_twisted_logs`` parameters that can be used to override the default
   logging behaviour.  (Jonathan Lange, #942785)
@@ -89,7 +106,6 @@ Changes
 * New fixture ``CaptureTwistedLogs`` that can be used with
   ``AsynchronousDeferredRunTest`` to attach a detail containing everything
   logged to Twisted during the test run.  (Jonathan Lange, #1515362)
-
 
 1.8.1
 ~~~~~
